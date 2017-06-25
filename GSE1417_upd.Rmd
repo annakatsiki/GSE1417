@@ -1,0 +1,195 @@
+---
+title: "GSE1417_upd"
+author: "anna"
+date: "24 Ã·¿Ôı 2017"
+output: html_document
+---
+
+```{r Loading packages}
+###Loading packages
+library(affy)
+library(limma)
+```
+
+```{r Setting wd}
+setwd("C:/Users/anna/Desktop/PhD/Affy_data/GSE1417")
+```
+
+```{r Data Import}
+###Data Import
+Data<- ReadAffy()
+sampleNames(Data)
+sampleNames(Data) <- sub("\\.CEL$", "", sampleNames(Data))
+condition <- c("control","control", "control","control", "camp", "camp", "camp")
+repl<-c("1", "2", "3", "4", "1", "2", "3")
+df <- data.frame(condition, row.names = sampleNames(Data), stringsAsFactors = TRUE, repl=repl)
+summary(df)
+```                   
+
+```{r Preprocessing-rma}
+###Preprocessing - rma
+Data_rma<-rma(Data)
+dim(Data_rma)
+e <- exprs(Data_rma)
+dim(e)
+```
+
+```{r NonSpecific Filtering-panp}
+###Non-Specific Intensity Filtering
+library(panp)
+PA<-pa.calls(Data_rma)
+PAcalls<-PA$Pcalls
+Psum<-as.numeric(apply(PAcalls=="P",1,sum))
+pr<- Psum>=dim(df)[1]/2
+drop_rows<-which(pr!=T)
+fPAcalls<- PAcalls[-drop_rows,]
+dim(fPAcalls)
+Pvalues<-PA$Pvals
+write.table(PAcalls,file="PAcalls_rma.tsv", sep="\t", col.names = NA, quote=F)
+write.table(fPAcalls,file="filtered_PAcalls_rma.tsv", sep="\t", col.names = NA, quote=F)
+write.table(Pvalues,file="Pvalues_rma.tsv", sep="\t", col.names = NA, quote=F)
+f1_e<-e[-drop_rows,]
+f1_Data_rma<-Data_rma[-drop_rows,]
+dim(f1_e)
+dim(f1_Data_rma)
+```
+
+```{r NonSpecific Filtering-kOverA}
+filter1<- function(ExpressionSet, threshold1, threshold2) {
+   if(require(genefilter)){
+    set <- ExpressionSet
+    f1 <- pOverA(threshold1,threshold2, na.rm = T)
+    ffun <- filterfun(f1)
+    filter <- genefilter(exprs(set),ffun)
+    filtered <- set[filter,]
+    return(filtered)
+   }
+}
+filter2<- function(Matrix, threshold1, threshold2) {
+   if(require(genefilter)){
+    m <- Matrix
+    f1 <- pOverA(threshold1,threshold2, na.rm = T)
+    ffun <- filterfun(f1)
+    filter <- genefilter(m,ffun)
+    filtered <- m[filter,]
+    return(filtered)
+   }
+}
+f2_Data_rma<-filter1(Data_rma,0.5,log2(100))  
+dim(f2_Data_rma)
+f2_e<- filter2(e, 0.5, log2(100))
+dim(f2_e)
+```
+
+```{r NonSpecific Filtering-shorth}
+row.mean <- esApply(Data_rma,1,mean) 
+sh <- shorth(row.mean)
+hist(e)
+abline(v=sh, col="red")
+f3_Data_rma <- Data_rma[row.mean >=sh,]
+dim(f3_Data_rma)
+```
+
+```{r Filtering Results - Comparison}
+v<- c(dim(Data_rma)[1], dim(f1_Data_rma)[1], dim(f2_Data_rma)[1], dim(f3_Data_rma)[1])
+filt.matrix<- data.frame(features=v, filt.method = c("before filt", "panp", "pOverA", "shorth"))
+filt.matrix
+```
+
+```{r Quality Assessment}
+###Quality Assessment- Checking for Batch Effect
+plotMDS(e, labels = df$condition, col=as.numeric(as.factor(df$repl)))
+plotMDS(f1_e, labels = df$condition, col=as.numeric(as.factor(df$repl)))
+```
+
+```{r Linear Modelling}
+###Linear Modelling
+cond<-as.factor(df$condition)
+cond <- relevel(cond, "control") #set "control" as the first level
+cond
+batch<-as.numeric(df$repl)
+batch
+design<-model.matrix(~0 + cond + batch)
+colnames(design)<-c("control", "campt", "batch")
+design
+fit<-lmFit(f1_e,design)
+head(fit$coefficients)
+contr<-makeContrasts(ctrl.vs.campt = campt - control, levels = design)
+fit2<-contrasts.fit(fit, contr)
+fit3<-eBayes(fit2,trend=T, robust = T)
+top<-topTable(fit3, coef="ctrl.vs.campt", number = nrow(fit3), adjust.method = "fdr", sort="none")
+head(top)
+dim(top)
+```
+
+```{r Significant DE genes}
+###Significant DE genes
+res<-decideTests(fit3,method = "separate", adjust.method = "fdr", p.value = 0.01, lfc = 0.5)
+vennDiagram(res, include = "up", show.include = T)
+vennDiagram(res, include = "down", show.include = T)
+vennDiagram(res, include = "both", show.include = T)
+
+volcanoplot(fit3, coef="ctrl.vs.campt", highlight=0, names=fit3$genes$ID,
+xlab="Log Fold Change", ylab="Log Odds", pch=16, cex=0.35)
+```
+
+```{r Keeping DE genes to a data.frame}
+summary(res)
+class(res@.Data)
+str(res@.Data)
+colnames(res@.Data)
+keep<-which((res@.Data) != 0 , arr.ind = TRUE) 
+dim(keep)
+sign<-top[which(abs(top$logFC) > 0.5 & top$adj.P.Val < 0.01),]
+dim(sign)
+```
+
+```{r Annotation}
+###Annotation
+library(AnnotationDbi)
+Data@cdfName
+library(hgu133a.db)
+annotf<- function(DataFrame, db) {  ###gia annotation
+  if (require(hgu133a.db)) { 
+    sign <- DataFrame
+    ID <- rownames(sign)
+    #print(c("length(ID)=", length(ID)), quote = F)
+    gene_symbol <- vector (length= length(ID))
+    geneName <- select(db,ID, "SYMBOL") 
+    #print(c("dim(geneName)=", dim(geneName)), quote = F)
+    sign <- cbind("probeID"= rownames(sign), gene_symbol, sign)
+    sign[,2]<- geneName[match(sign[,1], geneName[,1], nomatch = 0),2]
+    #print(c("dim(sign)=", dim(sign)), quote = F)
+    return(sign)
+  }
+}
+sign<- annotf(sign, hgu133a.db)
+dim(sign)
+```
+
+```{r Filtering for NA in geneNames}
+###Filtering for NA geneNames
+sign<- sign[is.na(sign$gene_symbol)==FALSE,]
+dim(sign)
+```
+
+```{r Filtering for unique geneNames}
+unFilt<- function(character, DataFrame) { ###filtering for unique genes, 1st argument: sign$gene_symbol
+  c <- character
+  sign <- DataFrame
+  un <- unique(c)
+  print(c("length(un)=",length(un)), quote = FALSE)
+  y <- duplicated(c)
+  sign_un <- sign[y==FALSE,]
+  return(sign_un)
+}
+sign_un<- unFilt(sign$gene_symbol, sign)
+dim(sign_un)
+```
+
+```{r Writing DE genes in .tsv files}
+write.table(sign_un, file="DE_genes.tsv", sep="\t", col.names = NA, quote=F)
+table4BIM<- sign_un[,c(2,3,6)]
+write.table(table4BIM, file="4BIM.tsv", sep="\t", row.names=F,col.names = F, quote = F)
+```
+
